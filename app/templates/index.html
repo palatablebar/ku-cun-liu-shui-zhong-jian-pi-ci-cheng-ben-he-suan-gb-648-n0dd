@@ -34,6 +34,7 @@
       <div class="filters">
         <span class="panel-sub">{{ log | length }} 条</span>
         <button class="btn btn-ghost" id="log-toggle" type="button">暂停</button>
+        <button class="btn btn-ghost" id="run-patch" type="button">补丁样例</button>
         <button class="btn" id="run-demo" type="button">重跑</button>
       </div>
     </header>
@@ -78,6 +79,42 @@
 </div>
 
 <div class="row-2">
+  {% if patch %}
+  <section class="panel">
+    <header class="panel-head">
+      <h2>最近补丁</h2>
+      <span class="panel-sub">{{ patch.applied_at | localdt }}</span>
+    </header>
+    <table class="table">
+      <tbody>
+        <tr><td>补丁文件</td><td class="num">{{ patch.filename }}</td></tr>
+        <tr>
+          <td>采信分类</td>
+          <td class="num">
+            新增 {{ patch.report.adopted.added | length }}
+            · 升级 {{ patch.report.adopted.upgraded | length }}
+            · 冲突 {{ patch.report.adopted.conflict | length }}
+            · 过旧 {{ patch.report.adopted.stale | length }}
+            · 一致 {{ patch.report.adopted.unchanged | length }}
+            · 无效 {{ patch.report.adopted.invalid | length }}
+            · 修复 {{ patch.report.adopted.resolved | length }}
+          </td>
+        </tr>
+        {% for item in patch.report.rejudged %}
+        <tr>
+          <td>改判 {{ item.doc_no }}</td>
+          <td class="num">
+            {% for v in item.before %}{{ v.status | status_label }}{{ v.reason | reason_label }}×{{ v.rows }} {% endfor %}
+            →
+            {% for v in item.after %}{{ v.status | status_label }}{{ v.reason | reason_label }}×{{ v.rows }} {% endfor %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+  {% endif %}
+
   <section class="panel">
     <header class="panel-head">
       <h2>隔离原因</h2>

@@ -39,6 +39,22 @@ curl -s -F file=@/path/to/opening.csv localhost:18207/api/movements/opening
 
 导入只接受与样例同列名（或登记过的英文别名）的文件；列名不对时首行会被判表头缺失。
 
+## 增量补丁（上游每天只回传变化行）
+
+```bash
+curl -s -F file=@/path/to/patch.csv localhost:18207/api/movements/patch
+curl -s -F sample=patch_day1.csv localhost:18207/api/movements/patch
+curl -s localhost:18207/api/movements/patches            # 补丁历史
+curl -s localhost:18207/api/movements/patches/<run_id>   # 完整采信报告
+```
+
+- 补丁与当前基线按 `(单据号, 行号)` 合并后走同一后半链，当天即可核算，不用等全量。
+- 响应里的 `patch.adopted` 给出逐行分类（新增/升级/冲突/过旧/一致/无效/修复），
+  `patch.rejudged` 列出因此改判的单据（如缺边调拨补齐后转采纳）。
+- 同一补丁重试返回同一 `run_id`，不新增流水行或成本层；采信中断后旧批次与基线原样保留。
+- 整批导入（`/api/movements/import`）会重置基线，适合全量重导；补丁批次之后
+  导入新期初会自动沿用合并集，不需要补丁文件落盘。
+
 ## 盘点提交与版本
 
 ```bash
@@ -63,6 +79,7 @@ docker compose exec -T app python -m pytest -q
 |---|---|---|
 | 首页 200 但数字全 0 | 还没跑批次 | 点「重跑」或 POST `/api/demo/run` |
 | 导入回报 404 | 样例名不在 `sample_data/` | 用上传文件或核对样例名 |
-| `POST /api/replay` 409 | 批次登记的源文件已不在样例目录 | 重新导入流水 |
+| 补丁回报 400 `E_PATCH_EMPTY` | 补丁没有数据行（空文件/仅表头） | 核对上游导出，基线与批次未改动 |
+| `POST /api/replay` 409 | 老批次没有输入存档且源文件已移除 | 重新导入流水 |
 | 盘点提交 409 | 版本旧于已记录版本 | 升版本号再提交 |
 | 层金额与期末金额不符 | 有人直接改库 | 重跑批次会先删后插，恢复一致 |

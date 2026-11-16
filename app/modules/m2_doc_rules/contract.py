@@ -121,5 +121,7 @@ def describe(settings) -> dict:
             "physical_counts.csv",
             "movements_truncated.csv",
             "movements_header_only.csv",
+            "patch_day1.csv",
+            "patch_day2.csv",
         ],
     }

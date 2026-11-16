@@ -9,3 +9,5 @@
 | `movements_truncated.csv` | 末行截断 | 末行无换行且列数不足 |
 | `movements_header_only.csv` | 仅表头 | 没有数据行 |
 | `empty.csv` | 空文件 | 0 字节 |
+| `patch_day1.csv` | 当日补丁：补齐 DB-2006 调拨入边、RK-2019 升版本、新增 RK-3001、CK-2002 原样重发 | 配合脏样例基线演示采信分类与改判 |
+| `patch_day2.csv` | 次日补丁：DB-3007 双边调拨、RK-2019 版本 3 重发（判一致） | RK-3002 数量是空值哨兵（进隔离） |

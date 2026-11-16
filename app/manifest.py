@@ -43,17 +43,22 @@ def json_safe(value):
 
 
 def build_manifest(run: dict, checks: list[dict] | None = None) -> dict:
+    movements = {
+        "file": run.get("movements_file") or "",
+        "sha256": run.get("movements_sha256") or "",
+        "bytes": run.get("movements_bytes", 0),
+    }
+    if run.get("baseline_sha256"):
+        movements["baseline_sha256"] = run["baseline_sha256"]
+    if run.get("patch_sha256"):
+        movements["patch_sha256"] = run["patch_sha256"]
     return {
         "run_id": run["run_id"],
         "created_at": run["created_at"],
         "rule_version": run["rule_version"],
         "params": run.get("params", {}),
         "inputs": {
-            "movements": {
-                "file": run.get("movements_file") or "",
-                "sha256": run.get("movements_sha256") or "",
-                "bytes": run.get("movements_bytes", 0),
-            },
+            "movements": movements,
             "opening": {
                 "file": run.get("opening_file") or "",
                 "sha256": run.get("opening_sha256") or "",

@@ -1,14 +1,14 @@
 # 深度登记 stockflow
 
-- 规模：中型（7 个功能模块 / 7 个页面 / 73 条测试 / 12 条 TRAP）
+- 规模：中型（7 个功能模块 / 7 个页面 / 89 条测试 / 14 条 TRAP）
 - 核心规则：按 `(发生时间, 单据号, 行号)` 全序重放；出库超过在手整行隔离且不压负库存；调拨必须双边同料异仓等量；入库建 FIFO 层、出库吃最早层、退货带原单回原层、无原单建新层；成本 = 消耗层金额之和（Decimal）。
-- 使用者与工作流：区域仓 3 个仓、900 个物料的库存核算员，每月把三套系统导出的出入库流水、期初余额与实盘表放进来，一次运行得到采纳/隔离/层/成本/盘点差异与可导出的证据行。
+- 使用者与工作流：区域仓 3 个仓、900 个物料的库存核算员，每月把三套系统导出的出入库流水、期初余额与实盘表放进来，一次运行得到采纳/隔离/层/成本/盘点差异与可导出的证据行。上游每天只回传有变化的流水行时，用增量补丁与基线合并，当天即可核算。
 
 ## 功能模块
 
 | 模块 | 使用者动作 | 入口 | 核心文件 | 测试 |
 |---|---|---|---|---|
-| M1 流水采信 | 导入流水或期初，看到编码、分段、列数与原始行号 | POST /api/movements/import、页面 /movements | `app/modules/m1_ingest/reader.py` `app/modules/m1_ingest/decode.py` | `tests/test_m1_ingest.py` |
+| M1 流水采信 | 导入流水或期初，应用增量补丁，看到编码、分段、列数与原始行号 | POST /api/movements/import、POST /api/movements/patch、页面 /movements | `app/modules/m1_ingest/reader.py` `app/modules/m1_ingest/decode.py` `app/modules/m1_ingest/patch.py` | `tests/test_m1_ingest.py` `tests/test_patch.py` |
 | M2 单据规则 | 查列定义、方向、单价义务与单位换算 | GET /api/contract | `app/modules/m2_doc_rules/contract.py` `app/modules/m2_doc_rules/coerce.py` | `tests/test_m2_doc_rules.py` |
 | M3 质量隔离 | 按原因码看隔离行并导出证据 CSV | GET /api/quarantine、GET /api/quarantine.csv | `app/modules/m3_quality/rules.py` `app/modules/m3_quality/quarantine.py` | `tests/test_m3_quality.py` |
 | M4 时序重放 | 重放流水，看超库存拒绝、调拨配对与回原层 | POST /api/replay | `app/modules/m4_replay/replay.py` `app/modules/m4_replay/fifo.py` | `tests/test_m4_replay.py` |
@@ -16,7 +16,7 @@
 | M6 盘点对账 | 看六本账、提交实盘、按版本闸门拒旧版本 | GET /api/reconcile、POST /api/reconcile/counts | `app/modules/m6_reconcile/counts.py` `app/modules/m6_reconcile/balance.py` | `tests/test_m6_reconcile.py` |
 | M7 导出 | 导出流水证据行、层、成本与运行清单 | GET /api/export/movements.csv、页面 /export | `app/modules/m7_export/csv_out.py` `app/modules/m7_export/manifest_out.py` | `tests/test_m7_export.py` |
 
-端到端：`tests/test_e2e.py`（脏样例 → 采信 → 质量 → 重放 → 成本 → 盘点 → 导出；含 6 个页面 200、幂等重跑、干净样例同路径与失败输入）；不变量：`tests/test_invariants.py`（层守恒、层边界、调拨金额对称、盘点调整守恒、优先级置换）。
+端到端：`tests/test_e2e.py`（脏样例 → 采信 → 质量 → 重放 → 成本 → 盘点 → 导出；含 6 个页面 200、幂等重跑、干净样例同路径与失败输入）；不变量：`tests/test_invariants.py`（层守恒、层边界、调拨金额对称、盘点调整守恒、优先级置换）；增量补丁：`tests/test_patch.py`（采信分类、改判单据、幂等重试、冲突稳定、中断回滚、补丁后重放与导出一致）。
 
 ## 陷阱登记
 
@@ -34,6 +34,8 @@
 | TRAP-19 | 一行同时命中列数、单位、数量三类问题 | 取哪条原因码取决于检查顺序 | 原因码优先级表固定，取最高一条 | `app/reasons.py`、`app/modules/m3_quality/rules.py` | `tests/test_m3_quality.py::test_priority_order_is_stable` |
 | TRAP-21 | 调拨只有一条边，或两边数量不等 | 单边也建层，凭空多出库存 | 按单据号配对：缺边、异料、同仓、数量不等整组隔离 | `app/modules/m4_replay/replay.py` | `tests/test_m4_replay.py::test_transfer_missing_leg_quarantined` |
 | TRAP-26 | 旧版本盘点提交覆盖新盘点 | 后提交无条件覆盖 | 版本闸门：旧版本 409，同版本不同内容 409，同版本同内容幂等 | `app/modules/m6_reconcile/counts.py`、`app/modules/m6_reconcile/service.py` | `tests/test_m6_reconcile.py::test_stale_revision_rejected` |
+| TRAP-31 | 上游只回传变化行，整批替换 | 未变化的旧行从账上消失 | 变化行与基线按业务键合并后走同一后半链；未解决的隔离行随基线携带，修复判 resolved | `app/modules/m1_ingest/patch.py`、`app/pipeline.py` | `tests/test_patch.py::test_patch_applies_delta_and_reports` |
+| TRAP-32 | 同一补丁重试 / 采信中断 | 重试新增流水与层；中断留下半个批次 | 一致行不进合并集，合并集 canonical 化进 run_id；计算全在内存，落库单事务，失败整体回滚 | `app/modules/m1_ingest/patch.py`、`app/store.py` | `tests/test_patch.py::test_patch_retry_is_idempotent`、`tests/test_patch.py::test_patch_interrupted_restores_previous` |
 
 ## 对账规则
 
@@ -52,4 +54,5 @@
 - 不支持按件计量的物料：单位只接受 kg 与 g，`件` 进隔离。
 - 调拨入边成本按消耗金额除数量后量化到四位，跨多个不同成本层时会出现 0.0001 级尾差，未做尾差再分配。
 - 不做并发写入控制：SQLite 单进程使用，同一批次重跑走先删后插。
-- 历史批次的流水文件若已从 `sample_data/` 移除，`POST /api/replay` 会返回 409，需要重新导入。
+- 基线按业务键 + 版本 + 内容指纹去重：完全相同的重复行只留一份（首次导入的批次里仍保留原始行数）。
+- 2026.11.1 之前生成的老批次没有输入存档，`POST /api/replay` 在其流水文件移出样例目录后返回 409；新批次一律从存档重放。

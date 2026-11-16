@@ -100,8 +100,40 @@
     });
   }
 
+  function bindPatch() {
+    const button = $("#run-patch");
+    if (!button) {
+      return;
+    }
+    button.addEventListener("click", async function () {
+      if (state.busy) {
+        return;
+      }
+      state.busy = true;
+      button.disabled = true;
+      button.textContent = "采信中";
+      try {
+        const form = new FormData();
+        form.append("sample", "patch_day1.csv");
+        const response = await fetch("/api/movements/patch", { method: "POST", body: form });
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error((payload && payload.error ? payload.error : "E_HTTP") + " · " + (payload && payload.message ? payload.message : "请求失败"));
+        }
+        window.location.reload();
+      } catch (error) {
+        note($("#log-note"), String(error.message || error), "bad");
+        button.disabled = false;
+        button.textContent = "补丁样例";
+      } finally {
+        state.busy = false;
+      }
+    });
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
     bindDemo();
+    bindPatch();
     bindCountForm();
   });
 })();

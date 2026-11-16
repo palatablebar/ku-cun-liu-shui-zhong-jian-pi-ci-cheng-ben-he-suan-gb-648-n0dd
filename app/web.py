@@ -197,6 +197,7 @@ def setup(app: FastAPI) -> None:
                 "cost": cost,
                 "report": report,
                 "log": store.log_events(run["run_id"]) if run else [],
+                "patch": store.latest_patch(),
                 "quarantine": [row for row in movements if row["status"] == "quarantine"],
                 "distribution": reasons.distribution(
                     [row for row in movements if row["status"] == "quarantine"]),

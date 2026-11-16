@@ -45,7 +45,9 @@ CREATE TABLE IF NOT EXISTS runs (
     cogs TEXT NOT NULL DEFAULT '0',
     ending_value TEXT NOT NULL DEFAULT '0',
     status TEXT NOT NULL DEFAULT 'pending',
-    duration_ms INTEGER NOT NULL DEFAULT 0
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    baseline_sha256 TEXT NOT NULL DEFAULT '',
+    patch_sha256 TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS run_log (
     run_id TEXT NOT NULL,
@@ -135,6 +137,37 @@ CREATE TABLE IF NOT EXISTS count_state (
     run_id TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL DEFAULT ''
 );
+-- 当前生效的流水基线：每业务键每版本每取值一行，增量补丁按它合并。
+-- 无解析码的行参与版本裁决；有解析码的隔离行（reason 非空）也随基线携带，
+-- 直到上游送来同业务键的可采信行（判修复）才移出。
+CREATE TABLE IF NOT EXISTS movement_baseline (
+    doc_no TEXT NOT NULL,
+    line_no INTEGER NOT NULL,
+    revision INTEGER NOT NULL,
+    fingerprint TEXT NOT NULL,
+    cells_json TEXT NOT NULL,
+    row_no INTEGER NOT NULL DEFAULT 0,
+    reason TEXT NOT NULL DEFAULT '',
+    column_ok INTEGER NOT NULL DEFAULT 1,
+    truncated INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (doc_no, line_no, revision, fingerprint)
+);
+-- 每个批次的输入存档：整批导入存原始字节，补丁批次存合并集 canonical 字节；
+-- 重放优先读存档，样例文件被移走也不影响。
+CREATE TABLE IF NOT EXISTS run_inputs (
+    run_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    content BLOB NOT NULL,
+    PRIMARY KEY (run_id, kind)
+);
+-- 补丁采信记录：run_id 即补丁批次，同一补丁重试只留一条。
+CREATE TABLE IF NOT EXISTS patch_log (
+    run_id TEXT PRIMARY KEY,
+    patch_sha256 TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    applied_at TEXT NOT NULL,
+    report_json TEXT NOT NULL
+);
 """
 
 def _bind(value):
@@ -150,7 +183,14 @@ RUN_COLUMNS = (
     "movements_bytes", "opening_bytes", "counts_bytes", "raw_rows", "applied", "quarantined",
     "superseded", "duplicate", "blank", "segments", "opening_qty", "in_qty", "out_qty",
     "adj_in_qty", "adj_out_qty", "ending_qty", "cogs", "ending_value", "status", "duration_ms",
+    "baseline_sha256", "patch_sha256",
 )
+
+# 老库缺列时按此补列；新库由 SCHEMA 直接建好。
+RUN_MIGRATIONS = {
+    "baseline_sha256": "ALTER TABLE runs ADD COLUMN baseline_sha256 TEXT NOT NULL DEFAULT ''",
+    "patch_sha256": "ALTER TABLE runs ADD COLUMN patch_sha256 TEXT NOT NULL DEFAULT ''",
+}
 
 
 class Store:
@@ -175,6 +215,12 @@ class Store:
     def init(self) -> None:
         with self._conn() as conn:
             conn.executescript(SCHEMA)
+            existing = {
+                row[1] for row in conn.execute("PRAGMA table_info(runs)").fetchall()
+            }
+            for column, ddl in RUN_MIGRATIONS.items():
+                if column not in existing:
+                    conn.execute(ddl)
 
     # ---------- 批次 ----------
     @staticmethod
@@ -202,7 +248,13 @@ class Store:
 
     def save_run(self, run: dict, movements: list[dict], layers: list[dict],
                  consumptions: list[dict], counts: list[dict],
-                 log: list[dict]) -> None:
+                 log: list[dict], baseline: list[dict] | None = None,
+                 inputs: dict | None = None, patch: dict | None = None) -> None:
+        """写入一个批次；基线、输入存档、补丁记录与批次同事务提交。
+
+        任一写入失败整体回滚：旧批次、旧基线、旧补丁记录原样保留，
+        采信中断后系统回到完整旧版。
+        """
         params_json = json.dumps(run.get("params", {}), ensure_ascii=False, sort_keys=True)
         run_id = run["run_id"]
         with self._conn() as conn:
@@ -295,6 +347,46 @@ class Store:
                     for item in log
                 ],
             )
+            if baseline is not None:
+                conn.execute("DELETE FROM movement_baseline")
+                conn.executemany(
+                    """INSERT OR REPLACE INTO movement_baseline
+                    (doc_no, line_no, revision, fingerprint, cells_json, row_no,
+                     reason, column_ok, truncated)
+                    VALUES (?,?,?,?,?,?,?,?,?)""",
+                    [
+                        (
+                            entry["doc_no"], int(entry["line_no"]),
+                            int(entry["revision"]), entry["fingerprint"],
+                            json.dumps(entry.get("cells") or {}, ensure_ascii=False),
+                            int(entry.get("row_no") or 0),
+                            entry.get("reason") or "",
+                            1 if entry.get("column_ok", True) else 0,
+                            1 if entry.get("truncated") else 0,
+                        )
+                        for entry in baseline
+                    ],
+                )
+            if inputs is not None:
+                conn.execute("DELETE FROM run_inputs WHERE run_id = ?", (run_id,))
+                conn.executemany(
+                    "INSERT INTO run_inputs (run_id, kind, content) VALUES (?,?,?)",
+                    [
+                        (run_id, kind, sqlite3.Binary(content))
+                        for kind, content in inputs.items()
+                    ],
+                )
+            if patch is not None:
+                conn.execute(
+                    """INSERT OR REPLACE INTO patch_log
+                    (run_id, patch_sha256, filename, applied_at, report_json)
+                    VALUES (?,?,?,?,?)""",
+                    (
+                        patch["run_id"], patch["patch_sha256"], patch["filename"],
+                        patch["applied_at"],
+                        json.dumps(patch["report"], ensure_ascii=False),
+                    ),
+                )
 
     def replace_counts(self, run_id: str, counts: list[dict]) -> None:
         """盘点记账：整批替换本批的盘点记录（版本闸门已在服务层校验）。"""
@@ -430,6 +522,60 @@ class Store:
                         int(row.get("applied_seq") or 0), run_id, row.get("seq", 0),
                     ),
                 )
+
+    # ---------- 流水基线 / 输入存档 / 补丁记录 ----------
+    def baseline(self) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM movement_baseline
+                ORDER BY doc_no, line_no, revision, fingerprint"""
+            ).fetchall()
+        return [
+            {
+                "doc_no": row["doc_no"],
+                "line_no": int(row["line_no"]),
+                "revision": int(row["revision"]),
+                "fingerprint": row["fingerprint"],
+                "cells": json.loads(row["cells_json"] or "{}"),
+                "row_no": int(row["row_no"]),
+                "reason": row["reason"] or "",
+                "column_ok": bool(row["column_ok"]),
+                "truncated": bool(row["truncated"]),
+            }
+            for row in rows
+        ]
+
+    def run_input(self, run_id: str, kind: str) -> bytes | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT content FROM run_inputs WHERE run_id = ? AND kind = ?",
+                (run_id, kind),
+            ).fetchone()
+        return bytes(row["content"]) if row else None
+
+    @staticmethod
+    def _patch_row(row: sqlite3.Row) -> dict:
+        item = dict(row)
+        item["report"] = json.loads(item.pop("report_json") or "{}")
+        return item
+
+    def patches(self, limit: int = 20) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM patch_log ORDER BY rowid DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [self._patch_row(row) for row in rows]
+
+    def latest_patch(self) -> dict | None:
+        items = self.patches(1)
+        return items[0] if items else None
+
+    def patch(self, run_id: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM patch_log WHERE run_id = ?", (run_id,)
+            ).fetchone()
+        return self._patch_row(row) if row else None
 
     # ---------- 盘点版本水位 ----------
     def count_state(self, count_no: str) -> dict | None:

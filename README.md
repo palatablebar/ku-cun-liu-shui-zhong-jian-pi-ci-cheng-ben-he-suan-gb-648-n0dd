@@ -6,6 +6,7 @@
 ## 能力
 
 - 采信：编码回退链（UTF-8 BOM / UTF-8 / GB18030）、列名别名、重复表头分段、列数校验、末行截断、原始行号。
+- 增量补丁：上游只回传变化行时与当前基线按业务键合并，不整批替换、不等全量；采信分类与改判单据逐条可查；同一补丁重试幂等，采信中断回滚完整旧版。
 - 单据规则：六种单据类型的方向与单价义务，kg / g 换算，千分位与全角数字，空值哨兵，时间归一 UTC。
 - 质量隔离：18 类原因码，同一业务键按版本裁决，隔离行可导出 CSV（含原值与行号）。
 - 时序重放：全序重放，出库超在手整行拒绝后继续，调拨必须双边，退货可回原层。
@@ -17,7 +18,7 @@
 
 | 模块 | 动作 | 入口 |
 |---|---|---|
-| M1 流水采信 | 导入流水 / 期初，看编码与分段诊断 | `POST /api/movements/import`、`POST /api/movements/opening` |
+| M1 流水采信 | 导入流水 / 期初，应用增量补丁，看编码与分段诊断 | `POST /api/movements/import`、`POST /api/movements/opening`、`POST /api/movements/patch` |
 | M2 单据规则 | 查方向、单价义务、单位与量化刻度 | `GET /api/contract` |
 | M3 质量隔离 | 看隔离行与原因码分布 | `GET /api/quarantine`、`GET /api/quarantine.csv` |
 | M4 时序重放 | 单独重跑重放 | `POST /api/replay`、`GET /api/replay` |
@@ -33,6 +34,7 @@
 4. 入库建层；出库按层创建顺序消耗；退货带原单号按原消耗顺序回原层，无原单号按本次单价建新层。
 5. 出库成本 = 消耗层金额之和 − 退货恢复金额，`Decimal` 精确计算。
 6. 盘点差异：盘盈按最新层成本建调整层，盘亏按 FIFO 消耗，盘亏超过在手记拒绝。
+7. 增量补丁按 `(单据号, 行号)` 与基线做版本裁决：高版本采信、同版本同值判一致不重复入账、同版本异值整组隔离、低版本记过旧；合并集 canonical 化进 run_id，同一补丁重试不新增流水或成本层；未解决的隔离行随基线携带，修复后判 resolved 移出。
 
 ## 定义与已知不覆盖
 
@@ -60,6 +62,7 @@ docker compose up -d --build
 4. 「成本」页看按单据净成本与三条恒等式。
 5. 「盘点」页看盘点差异、提交实盘；旧版本提交会被拒绝。
 6. 「导出」页下载流水、层、成本与运行清单。
+7. 首页「补丁样例」应用 `patch_day1.csv`：看最近补丁的采信分类（新增/升级/一致）与改判单据（DB-2006 缺边调拨补齐）；再点一次验证幂等（同一批次，不新增行或层）。
 
 ## 目录
 
@@ -67,10 +70,11 @@ docker compose up -d --build
 app/
   main.py config.py errors.py reasons.py manifest.py store.py web.py pipeline.py
   modules/m1_ingest … m7_export   每个模块 handler + service + 2 个规则/读写文件
+  modules/m1_ingest/patch.py      增量补丁：基线合并、采信分类、改判对比
   templates/  base + 6 页
   static/     theme.css layout.css components.css app.js table.js console.js
 docs/         DEPTH.md DATA-DICTIONARY.md RUNBOOK.md
-sample_data/  7 个样例（含脏样例、截断、仅表头、空文件）
-tests/        conftest + 每模块一个测试文件 + e2e + invariants + fixtures
+sample_data/  9 个样例（含脏样例、截断、仅表头、空文件、两个当日补丁）
+tests/        conftest + 每模块一个测试文件 + 补丁 + e2e + invariants + fixtures
 Dockerfile docker-compose.yml requirements.txt .env.example .dockerignore pytest.ini
 ```
